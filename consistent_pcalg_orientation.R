@@ -6,7 +6,7 @@ skeleton <- function(suffStat, indepTest, alpha, labels, p,
 		     method = c("stable", "original", "stable.consistent"), m.max = Inf,
 		     fixedGaps = NULL, fixedEdges = NULL,
 		     NAdelete = TRUE, numCores = 1, verbose = FALSE,
-             lastState = NULL, initial_ord=0L)
+         lastState = NULL, initial_ord=0L)
 {
   ## Purpose: Perform undirected part of PC-Algorithm, i.e.,
   ## estimate skeleton of DAG given data
@@ -30,6 +30,7 @@ skeleton <- function(suffStat, indepTest, alpha, labels, p,
   ## ----------------------------------------------------------------------
   ## Author: Markus Kalisch, Date: 09.12.2009
   ## Modification: Diego Colombo; Martin Maechler; Alain Hauser
+  ## Modification for consistent separating set: Honghao Li; Vicent Cabeli
 
   ## x,y,S konstruieren
   ##-   tst <- try(indepTest(x,y,S, obj))
@@ -80,7 +81,9 @@ skeleton <- function(suffStat, indepTest, alpha, labels, p,
   else if (!identical(fixedEdges, t(fixedEdges)) )
     stop("fixedEdges must be symmetric")
 
+  # Keep the graph with unconditional independent edges removed
   GAfterInitialization = matrix()
+
   ## Check number of cores
   stopifnot((is.integer(numCores) || is.numeric(numCores)) && numCores > 0)
   if (numCores > 1 && method != "stable.consistent") {
@@ -136,18 +139,20 @@ skeleton <- function(suffStat, indepTest, alpha, labels, p,
         if(verbose && (verbose >= 2 || i%%100 == 0)) cat("|i=", i, "|iMax=", remEdges, "\n")
         x <- ind[i, 1]
         y <- ind[i, 2]
-        #if(!is.null(lastState)) lastState$initialize_consistent_candidates()
         if (G[y, x] && !fixedEdges[y, x]) {
           nbrsBool <- if(method == "stable") G.l[[x]] else G[,x]
           nbrsBool[y] <- FALSE
-          if(is.null(lastState)) nbrs <- seq_p[nbrsBool]
-          else{
-            consistent_Zs = lastState$get_candidate_z(x,y)
-            nbrs <- base::intersect(seq_p[nbrsBool], consistent_Zs) #Get only consistent candidates for separation set
-            non_descendants <- which(lastState$adj_matrix_oriented[,x]==1)
-            nbrs <- base::intersect(nbrs, non_descendants)
+          if (is.null(lastState)) {
+            nbrs <- seq_p[nbrsBool]
           }
-          #nbrs <- sample(seq_p[nbrsBool], length(nbrs), replace=F) #Get random candidate set the size of consistent set
+          else {
+            # Get for separating set only candidate z's that are consistent
+            # with respect to the graph in the previous iteration
+            consistent_Zs = lastState$get_candidate_z(x,y)
+            nbrs <- base::intersect(seq_p[nbrsBool], consistent_Zs)
+            non_children <- which(lastState$adj_matrix_oriented[,x]==1)
+            nbrs <- base::intersect(nbrs, non_children)
+          }
           length_nbrs <- length(nbrs)
           if (length_nbrs >= ord) {
             if (length_nbrs > ord)
@@ -162,12 +167,7 @@ skeleton <- function(suffStat, indepTest, alpha, labels, p,
                 pval <- as.numeric(NAdelete) ## = if(NAdelete) 1 else 0
               if (pMax[x, y] < pval)
                 pMax[x, y] <- pval
-              S_is_consistent = TRUE
-              #if((!is.null(lastState)) && ord>0){
-              #  if(pval >= alpha) S_is_consistent = lastState$is_consistent(x,y,S)
-              #  #if(!S_is_consistent)print(paste(x,y, paste(S, collapse=",")))
-              #}
-              if((pval >= alpha && S_is_consistent)) { # independent and consistent with orientation with relation to last state
+              if(pval >= alpha) { # independent
                 G[x, y] <- G[y, x] <- FALSE
                 sepset[[x]][[y]] <- nbrs[S]
                 break
@@ -182,7 +182,7 @@ skeleton <- function(suffStat, indepTest, alpha, labels, p,
           }
         }
       }# for( i )
-      if(ord==0) GAfterInitialization = G
+      if (ord==0) GAfterInitialization = G
       ord <- ord + 1L
     } ## while()
     for (i in 1:(p - 1)) {
@@ -240,6 +240,7 @@ pc <- function(suffStat, indepTest, alpha, labels, p,
   ## ----------------------------------------------------------------------
   ## Author: Markus Kalisch, Date: 26 Jan 2006; Martin Maechler
   ## Modifications: Sarah Gerster, Diego Colombo, Markus Kalisch
+  ## Modification for consistent separating set: Honghao Li; Vicent Cabeli
 
   ## Initial Checks
   cl <- match.call()
@@ -269,91 +270,75 @@ pc <- function(suffStat, indepTest, alpha, labels, p,
 
   if (conservative && maj.rule) stop("Choose either conservative PC or majority rule PC!")
 
-
-  ################################################################################
-  ### CONSISTENCY
-
+  ## Consistency loop
   no_loop_graph_states = TRUE
   graphObject = NULL
   first_iteration = TRUE
   GAfterInitialization = NULL
   graph_states = list()
   consistent_iter = 0
-
-  while(no_loop_graph_states && consistent_iter < 100){
-
+  while (no_loop_graph_states && consistent_iter < 100) {
     ## Skeleton
     skel <- skeleton(suffStat, indepTest, alpha, labels = labels, method = skel.method,
                     fixedGaps = fixedGaps, fixedEdges = fixedEdges,
                     NAdelete=NAdelete, m.max=m.max, numCores=numCores, verbose=verbose,
                     lastState=graphObject, initial_ord = ifelse(first_iteration, 0, 1))
 
-    # Save adjacency matrix with unconditional (in)dependences to use as starting point in future iterations
-    if(first_iteration) {
-        GAfterInitialization = skel@GAfterInitialization
-        if(is.null(fixedGaps)){ fixedGaps = !GAfterInitialization}
-        else{ fixedGaps = fixedGaps | (!GAfterInitialization)}
+    # (Re-)Start from the graph with unconditional independent edges removed
+    if (first_iteration) {
+      GAfterInitialization = skel@GAfterInitialization
+      if (is.null(fixedGaps)) {
+        fixedGaps = !GAfterInitialization
+      }
+      else {
+        fixedGaps = fixedGaps | (!GAfterInitialization)
+      }
     }
 
     ## Orient edges
     orientation <- NULL
     if (!conservative && !maj.rule) {
-        orientation <- switch (u2pd,
-                               "rand" = udag2pdag(skel),
-                               "retry" = udag2pdagSpecial(skel)$pcObj,
-                               "relaxed" = udag2pdagRelaxed(skel, verbose = verbose, solve.confl = solve.confl))
+      orientation <- switch (u2pd,
+                             "rand" = udag2pdag(skel),
+                             "retry" = udag2pdagSpecial(skel)$pcObj,
+                             "relaxed" = udag2pdagRelaxed(skel, verbose = verbose, solve.confl = solve.confl))
     }
     else { ## u2pd "relaxed" : conservative _or_ maj.rule
-        ## version.unf defined per default
-        ## Tetrad CPC works with version.unf=c(2,1)
-        ## see comment on pc.cons.intern for description of version.unf
-        pc. <- pc.cons.intern(skel, suffStat, indepTest, alpha,
-                              version.unf = c(2,1), maj.rule = maj.rule, verbose = verbose)
-        orientation <- udag2pdagRelaxed(pc.$sk, verbose = verbose,
-                                        unfVect = pc.$unfTripl, solve.confl = solve.confl)
+      ## version.unf defined per default
+      ## Tetrad CPC works with version.unf=c(2,1)
+      ## see comment on pc.cons.intern for description of version.unf
+      pc. <- pc.cons.intern(skel, suffStat, indepTest, alpha,
+                            version.unf = c(2,1), maj.rule = maj.rule, verbose = verbose)
+      orientation <- udag2pdagRelaxed(pc.$sk, verbose = verbose,
+                                      unfVect = pc.$unfTripl, solve.confl = solve.confl)
     }
 
     G = as(orientation@graph, "matrix")
     graphObject = SimpleGraph(G, oriented=TRUE)
-
     sepSets = orientation@sepset
-
     # Save current consistent graph state
     G = graphObject$adj_matrix_oriented
-    print("# EDGES :")
-    print( sum((G+t(G))>0)/2)
-
+    cat("Number of edges: ", sum((G+t(G))>0)/2, "\n")
     # Check if the obtained adjacency matrix G is a previous result
-    if(!first_iteration){
-        for(statei in 1:length(graph_states)) {
-            if(all(graph_states[[statei]] == G)){
-                # Limit cycle found
-                print("Loop detected")
-                print(statei)
-                no_loop_graph_states = F
-                for(statek in statei:length(graph_states)){
-                    # Get the union of all adjacency matrices in the limit cycle
-                    G = G | graph_states[[statek]]
-                    #sepset becomes wrong
-                }
-                break
-            }
+    if (!first_iteration) {
+      for (state_i in 1:length(graph_states)) {
+        if (all(graph_states[[state_i]] == G)) {
+          cat("Loop detected: ", state_i, "\n")
+          no_loop_graph_states = F
+          for(state_k in state_i:length(graph_states)){
+            G = G | graph_states[[state_k]]
+          }
+          break
         }
+      }
     }
-
     graph_states[[length(graph_states)+1]] = G
     first_iteration = FALSE
-    #is_graph_consistent = graphObject$is_graph_consistent()
     consistent_iter = consistent_iter + 1
-  }
-  print("# EDGES FINAL:")
-  print( sum((G+t(G))>0)/2)
+  }  # while ()
+  cat("Final number of edges: ", sum((G+t(G))>0)/2, "\n")
   graphObject = SimpleGraph(G, oriented=TRUE)
-
-  #skel@call <- cl # so that makes it into result
-  ################################################################################
-
-  # Resolve sepset after consistency loop union
+  # Edges put back due to the union operation still have their separating set
   for(x in 1:(p-1)){
     for(y in (x+1):p){
       if(G[x,y] || G[y,x]){
@@ -362,56 +347,8 @@ pc <- function(suffStat, indepTest, alpha, labels, p,
       }
     }
   }
-
-  sepSets_matrix = do.call(rbind, sepSets)
-  which_sepSets = which(matrix(vapply(sepSets_matrix, function(x){!(is.null(x) ||
-                                                             length(x)==0)}, logical(1)),
-                               ncol=p), arr.ind=T)
-
-  #print(orientation@sepset)
-  #print(vapply(sepSets_matrix, function(x){!is.null(x) || length(x)!=0}, logical(1)))
-  #print(which_sepSets)
-  #print(sepSets[[1]][[30]])
-  # Check consistency of all separation sets in the union of the limit cycle
-  if(nrow(which_sepSets)>0){
-    add_back_list = c()
-    for(sepSet_index in 1:nrow(which_sepSets)){
-
-        #if(as(skel@graph, 'matrix')[x,y]) stop("Edge exists with sepset")
-        sepSet = which_sepSets[sepSet_index,]
-        x = sepSet[1]
-        y = sepSet[2]
-        z = sepSets[[x]][[y]]
-        # Checks if Z is consistent for X,Y pair, adds back X-Y edge if not
-        if(!graphObject$is_consistent(x,y,z)){
-            add_back_list = c(add_back_list, sepSet_index) # List of inconsistent pairs with respect to current graph
-            print(G[x,y] || G[y,x])
-            print(z)
-            print(paste(x,y,paste(z,collapse=',')))
-            graphObject$is_consistent(x,y,z,debug=TRUE)
-        }
-    }
-
-    # Add back inconsistent pairs all at once
-    print(paste("Adding back", length(add_back_list), "edges."))
-    if(length(add_back_list)>0){
-        write("Non zero add_back_list !", "~/Documents/PhD/Work/consistent_simulation/alert.txt", append=TRUE)
-    }
-    for(sepSet_index in 1:length(add_back_list)){
-        sepSet = which_sepSets[add_back_list[sepSet_index],]
-        x = sepSet[1]
-        y = sepSet[2]
-        graphObject$add_non_oriented_edge(x,y)
-    }
-    graphObject$bcc()
-    #graphObject$initialize_matrix_consistent_candidates()
-  }
-
-
   result = orientation
   result@graph <- as(graphObject$adj_matrix_oriented, "graphNEL")
   result@sepset <- sepSets
-
   result
-
 } ## {pc}

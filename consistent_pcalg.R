@@ -25,6 +25,7 @@ skeleton <- function(suffStat, indepTest, alpha, labels, p,
   ## ----------------------------------------------------------------------
   ## Author: Markus Kalisch, Date: 09.12.2009
   ## Modification: Diego Colombo; Martin Maechler; Alain Hauser
+  ## Modification for consistent separating set: Honghao Li; Vicent Cabeli
 
   ## x,y,S konstruieren
   ##-   tst <- try(indepTest(x,y,S, obj))
@@ -112,226 +113,165 @@ skeleton <- function(suffStat, indepTest, alpha, labels, p,
     done <- FALSE
     ord <- 0L
     n.edgetests <- numeric(1)# final length = max { ord}
-      n.edgetests[ord1 <- ord+1L] <- 0
-      done <- TRUE
-      ind <- which(G, arr.ind = TRUE)
-      ## For comparison with C++ sort according to first row
-      ind <- ind[order(ind[, 1]), ]
-      remEdges <- nrow(ind)
-      if (verbose)
-        cat("Order=", ord, "; remaining edges:", remEdges,"\n",sep = "")
-      if(method == "stable") {
-        ## Order-independent version: Compute the adjacency sets for any vertex
-        ## Then don't update when edges are deleted
-        G.l <- split(G, gl(p,p))
-      }
-      for (i in 1:remEdges) {
-        if(verbose && (verbose >= 2 || i%%100 == 0)) cat("|i=", i, "|iMax=", remEdges, "\n")
-        x <- ind[i, 1]
-        y <- ind[i, 2]
-        if (G[y, x] && !fixedEdges[y, x]) {
-          nbrsBool <- if(method == "stable") G.l[[x]] else G[,x]
-          nbrsBool[y] <- FALSE
-          nbrs <- seq_p[nbrsBool]
-          length_nbrs <- length(nbrs)
-          if (length_nbrs >= ord) {
-            if (length_nbrs > ord)
-              done <- FALSE
-            S <- seq_len(ord)
-            ## RANK
-            nbrsMax = NULL
-            ## RANK
-            repeat { ## condition w.r.to all  nbrs[S] of size 'ord'
-              n.edgetests[ord1] <- n.edgetests[ord1] + 1
-              pval <- indepTest(x, y, nbrs[S], suffStat)
-              if (verbose)
-                cat("x=", x, " y=", y, " S=", nbrs[S], ": pval =", pval, "\n")
-              if(is.na(pval))
-                pval <- as.numeric(NAdelete) ## = if(NAdelete) 1 else 0
-              if (pMax[x, y] < pval)
-                pMax[x, y] <- pval
-              if(pval >= alpha) { # independent
-                G[x, y] <- G[y, x] <- FALSE
-                sepset[[x]][[y]] <- nbrs[S]
+    ## Search only for unconditional independence. For the sake of simplicity,
+    ## only remove the while loop <while (!done && any(G) && ord <= m.max)>
+    n.edgetests[ord1 <- ord+1L] <- 0
+    done <- TRUE
+    ind <- which(G, arr.ind = TRUE)
+    ## For comparison with C++ sort according to first row
+    ind <- ind[order(ind[, 1]), ]
+    remEdges <- nrow(ind)
+    if (verbose)
+      cat("Order=", ord, "; remaining edges:", remEdges,"\n",sep = "")
+    if(method == "stable") {
+      ## Order-independent version: Compute the adjacency sets for any vertex
+      ## Then don't update when edges are deleted
+      G.l <- split(G, gl(p,p))
+    }
+    for (i in 1:remEdges) {
+      if(verbose && (verbose >= 2 || i%%100 == 0)) cat("|i=", i, "|iMax=", remEdges, "\n")
+      x <- ind[i, 1]
+      y <- ind[i, 2]
+      if (G[y, x] && !fixedEdges[y, x]) {
+        nbrsBool <- if(method == "stable") G.l[[x]] else G[,x]
+        nbrsBool[y] <- FALSE
+        nbrs <- seq_p[nbrsBool]
+        length_nbrs <- length(nbrs)
+        if (length_nbrs >= ord) {
+          if (length_nbrs > ord)
+            done <- FALSE
+          S <- seq_len(ord)
+          repeat { ## condition w.r.to all  nbrs[S] of size 'ord'
+            n.edgetests[ord1] <- n.edgetests[ord1] + 1
+            pval <- indepTest(x, y, nbrs[S], suffStat)
+            if (verbose)
+              cat("x=", x, " y=", y, " S=", nbrs[S], ": pval =", pval, "\n")
+            if(is.na(pval))
+              pval <- as.numeric(NAdelete) ## = if(NAdelete) 1 else 0
+            if (pMax[x, y] < pval)
+              pMax[x, y] <- pval
+            if(pval >= alpha) { # independent
+              G[x, y] <- G[y, x] <- FALSE
+              sepset[[x]][[y]] <- nbrs[S]
+              break
+            }
+            else {
+              nextSet <- getNextSet(length_nbrs, ord, S)
+              if (nextSet$wasLast)
                 break
-              }
-              ## RANK
-              #if(pval > pMax[x,y]) { # independent
-              #  #sepset[[x]][[y]] <- nbrs[S]
-              #  pMax[x, y] <- pval
-              #  nbrsMax <- nbrs[S]
-              #  #break
-              #}
-              ## RANK
-              else {
-                nextSet <- getNextSet(length_nbrs, ord, S)
-                if (nextSet$wasLast)
-                  break
-                S <- nextSet$nextSet
-              }
-            } ## repeat
-            ## RANK
-            #if(pMax[x,y] >= alpha) { #independent
-            #  G[x, y] <- G[y, x] <- FALSE
-            #  sepset[[x]][[y]] <- nbrsMax
-            #}
-            ## RANK
-          }
+              S <- nextSet$nextSet
+            }
+          } ## repeat
         }
-      }# for( i )
-      ord <- ord + 1L
+      }
+    }# for( i )
     for (i in 1:(p - 1)) {
       for (j in 2:p)
         pMax[i, j] <- pMax[j, i] <- max(pMax[i, j], pMax[j,i])
     }
 
     pMax_save = pMax
-   ################################################################################
-   # Constitency loop
-   #
-    # 1. ADD BACK INCONSISTENCIES
+    ## Constitency loop
     graph_states = list(G)
-
     no_loop_graph_states = TRUE
     is_graph_consistent = FALSE
-    g_last = SimpleGraph(G)
-
-    while(no_loop_graph_states && !is_graph_consistent){
-        # 2. REDO LOOP ON REMEDGES WITH CONSISTENCY TEST
-        G = graph_states[[1]]
-        pval <- NULL
-        sepset <- lapply(seq_p, function(.) vector("list",p))# a list of lists [p x p]
-        # save maximal p value
-        pMax <- pMax_save
-        done <- FALSE
-        ord <- 1L
-        n.edgetests <- numeric(1)# final length = max { ord}
-
-        while (!done && any(G) && ord <= m.max) {
-            #g = graph_from_adjacency_matrix(G, mode='undirected')
-            n.edgetests[ord1 <- ord+1L] <- 0
-            done <- TRUE
-            ind <- which(G, arr.ind = TRUE)
-            ## For comparison with C++ sort according to first row
-            ind <- ind[order(ind[, 1]), ]
-            remEdges <- nrow(ind)
-            if (verbose)
-                cat("Order=", ord, "; remaining edges:", remEdges,"\n",sep = "")
-            if(method == "stable") {
-                ## Order-independent version: Compute the adjacency sets for any vertex
-                ## Then don't update when edges are deleted
-                G.l <- split(G, gl(p,p))
-            }
-            for (i in 1:remEdges) {
-                if(verbose && (verbose >= 2 || i%%100 == 0)) cat("|i=", i, "|iMax=", remEdges, "\n")
-                x <- ind[i, 1]
-                y <- ind[i, 2]
-                if (G[y, x] && !fixedEdges[y, x]) {
-                  nbrsBool <- if(method == "stable") G.l[[x]] else G[,x]
-                  nbrsBool[y] <- FALSE
-                  #nbrs <- seq_p[nbrsBool]
-                  consistent_Zs = g_last$get_candidate_z(x,y)
-                  nbrs <- base::intersect(seq_p[nbrsBool], consistent_Zs) #Get only consistent candidates for separation set
-                  #nbrs <- sample(seq_p[nbrsBool], length(nbrs), replace=F) #Get random candidate set the size of consistent set
-                  length_nbrs <- length(nbrs)
-                  if (length_nbrs >= ord) {
-                    if (length_nbrs > ord)
-                      done <- FALSE
-                    S <- seq_len(ord)
-                    ## RANK
-                    nbrsMax = NULL
-                    ## RANK
-                    repeat { ## condition w.r.to all  nbrs[S] of size 'ord'
-
-                      n.edgetests[ord1] <- n.edgetests[ord1] + 1
-                      pval <- indepTest(x, y, nbrs[S], suffStat)
-                      if (verbose)
-                        cat("x=", x, " y=", y, " S=", nbrs[S], ": pval =", pval, "\n")
-                      if(is.na(pval))
-                        pval <- as.numeric(NAdelete) ## = if(NAdelete) 1 else 0
-                      if (pMax[x, y] < pval)
-                        pMax[x, y] <- pval
-                      if(pval >= alpha) { # independent
-                        G[x, y] <- G[y, x] <- FALSE
-                        sepset[[x]][[y]] <- nbrs[S]
-                        break
-                      }
-                      ## RANK
-                      #if(pval > pMax[x,y]) { # independent
-                      #  #sepset[[x]][[y]] <- nbrs[S]
-                      #  pMax[x, y] <- pval
-                      #  nbrsMax <- nbrs[S]
-                      #  #break
-                      #}
-                      ## RANK
-                      else {
-                        nextSet <- getNextSet(length_nbrs, ord, S)
-                        if (nextSet$wasLast)
-                          break
-                        S <- nextSet$nextSet
-                      }
-                    } ## repeat
-                    ## RANK
-                    #if(pMax[x,y] >= alpha){
-                    #  G[x, y] <- G[y, x] <- FALSE
-                    #  sepset[[x]][[y]] <- nbrsMax
-                    #}
-                    ## RANK
-                  }
-                }
-            }# for( i )
-            ord <- ord + 1L
-        } ## while()
-        for (i in 1:(p - 1)) {
-          for (j in 2:p)
-            pMax[i, j] <- pMax[j, i] <- max(pMax[i, j], pMax[j,i])
+    g_prev = SimpleGraph(G)
+    while (no_loop_graph_states && !is_graph_consistent) {
+      # (Re-)Start from the graph with unconditional independent edges removed
+      G = graph_states[[1]]
+      pval <- NULL
+      sepset <- lapply(seq_p, function(.) vector("list",p))# a list of lists [p x p]
+      # save maximal p value
+      pMax <- pMax_save
+      done <- FALSE
+      ord <- 1L
+      n.edgetests <- numeric(1)# final length = max { ord}
+      while (!done && any(G) && ord <= m.max) {
+        n.edgetests[ord1 <- ord+1L] <- 0
+        done <- TRUE
+        ind <- which(G, arr.ind = TRUE)
+        ## For comparison with C++ sort according to first row
+        ind <- ind[order(ind[, 1]), ]
+        remEdges <- nrow(ind)
+        if (verbose)
+          cat("Order=", ord, "; remaining edges:", remEdges,"\n",sep = "")
+        if(method == "stable") {
+          ## Order-independent version: Compute the adjacency sets for any vertex
+          ## Then don't update when edges are deleted
+          G.l <- split(G, gl(p,p))
         }
-
-        # Current graph
-        g_last = SimpleGraph(G)
-        print("# EDGES :")
-        print(sum(G)/2)
-
-        for(statei in 1:length(graph_states)) {
-            if(all(graph_states[[statei]] == G)){
-                no_loop_graph_states = F
-                for(statek in statei:length(graph_states)){
-                    G = G | graph_states[[statek]]
-                    #sepset becomes wrong
+        for (i in 1:remEdges) {
+          if(verbose && (verbose >= 2 || i%%100 == 0)) cat("|i=", i, "|iMax=", remEdges, "\n")
+          x <- ind[i, 1]
+          y <- ind[i, 2]
+          if (G[y, x] && !fixedEdges[y, x]) {
+            nbrsBool <- if(method == "stable") G.l[[x]] else G[,x]
+            nbrsBool[y] <- FALSE
+            # Get for separating set only candidate z's that are consistent
+            # with respect to the graph in the previous iteration
+            consistent_Zs = g_prev$get_candidate_z(x,y)
+            nbrs <- base::intersect(seq_p[nbrsBool], consistent_Zs)
+            length_nbrs <- length(nbrs)
+            if (length_nbrs >= ord) {
+              if (length_nbrs > ord)
+                done <- FALSE
+              S <- seq_len(ord)
+              repeat { ## condition w.r.to all  nbrs[S] of size 'ord'
+                n.edgetests[ord1] <- n.edgetests[ord1] + 1
+                pval <- indepTest(x, y, nbrs[S], suffStat)
+                if (verbose)
+                  cat("x=", x, " y=", y, " S=", nbrs[S], ": pval =", pval, "\n")
+                if(is.na(pval))
+                  pval <- as.numeric(NAdelete) ## = if(NAdelete) 1 else 0
+                if (pMax[x, y] < pval)
+                  pMax[x, y] <- pval
+                if(pval >= alpha) { # independent
+                  G[x, y] <- G[y, x] <- FALSE
+                  sepset[[x]][[y]] <- nbrs[S]
+                  break
                 }
-                break
+                else {
+                  nextSet <- getNextSet(length_nbrs, ord, S)
+                  if (nextSet$wasLast)
+                    break
+                  S <- nextSet$nextSet
+                }
+              } ## repeat
             }
+          }
+        }# for( i )
+        ord <- ord + 1L
+      } ## while()
+      for (i in 1:(p - 1)) {
+        for (j in 2:p)
+          pMax[i, j] <- pMax[j, i] <- max(pMax[i, j], pMax[j,i])
+      }
 
-            #sepset_mat <- do.call(rbind, sepset) # p*p matrix of sets
-            ## Save matrix of booleans indicating if the size of the separation set is > 0
-            #which_sepSet <- matrix(vapply(sepSet, function(set){!( (is.null(set)) ||
-            #                                                       length(set)==0 )}, logical(1)),
-            #                       ncol=p) # p*p matrix of booleans
-            #negative_edges <- which(which_sepSet, arr.ind = T)
-            #is_graph_consistent = TRUE
-            #for(i in 1:nrow(negative_edges)){
-            #    # Check consistency for every separation set
-            #    x <- negative_edges[i,1]
-            #    y <- negative_edges[i,2]
-            #    if (x>y) {x2=x; x=y; y=x2} #sepset_mat is only upper diagonal
-            #    z <- sepset_mat[x,y][[1]]
-            #    if(!is_consistent(g_last, x, y, z)) is_graph_consistent = FALSE
-            #}
+      # Save current graph
+      g_prev = SimpleGraph(G)
+      cat("Number of edges: ", sum(G)/2, "\n")
+      for (state_i in 1:length(graph_states)) {
+        if (all(graph_states[[state_i]] == G)) {
+          cat("Loop detected: ", state_i, "\n")
+          no_loop_graph_states = F
+          for(state_k in state_i:length(graph_states)){
+            G = G | graph_states[[state_k]]
+          }
+          break
         }
-        graph_states[[length(graph_states)+1]] = G
+      }
+      graph_states[[length(graph_states)+1]] = G
     }
-   # Constitency loop
-   ################################################################################
-  }
-
-  # Resolve sepset after consistency loop union
-  for(x in 1:(p-1)){
-    for(y in (x+1):p){
-      if(G[x,y]){
-        sepset[[x]][[y]] <- numeric(0)
-        sepset[[y]][[x]] <- numeric(0)
+    # Edges put back due to the union operation still have their separating set
+    for(x in 1:(p-1)){
+      for(y in (x+1):p){
+        if(G[x,y]){
+          sepset[[x]][[y]] <- numeric(0)
+          sepset[[y]][[x]] <- numeric(0)
+        }
       }
     }
+    ## End of Constitency loop
   }
 
   ## transform matrix to graph object :
@@ -381,6 +321,7 @@ pc <- function(suffStat, indepTest, alpha, labels, p,
   ## ----------------------------------------------------------------------
   ## Author: Markus Kalisch, Date: 26 Jan 2006; Martin Maechler
   ## Modifications: Sarah Gerster, Diego Colombo, Markus Kalisch
+  ## Modification for consistent separating set: Honghao Li; Vicent Cabeli
 
   ## Initial Checks
   cl <- match.call()
@@ -433,47 +374,39 @@ pc <- function(suffStat, indepTest, alpha, labels, p,
     orientation <- udag2pdagRelaxed(pc.$sk, verbose = verbose,
                                     unfVect = pc.$unfTripl, solve.confl = solve.confl)
   }
-
   G = as(orientation@graph, "matrix")
   graphObject = SimpleGraph(G, oriented=TRUE)
   sepSets = orientation@sepset
-
   sepSets_matrix = do.call(rbind, orientation@sepset)
-  which_sepSets = which(matrix(vapply(sepSets_matrix, function(x){!(is.null(x) ||
-                                                                    length(x)==0)}, logical(1)),
-                               ncol=p), arr.ind=T)
-
+  which_sepSets = which(matrix(vapply(
+    sepSets_matrix,
+    function(x) {!(is.null(x) || length(x)==0)},
+    logical(1)
+  ), ncol=p), arr.ind=T)
   # Check consistency of all separation sets in the union of the limit cycle
-  if(nrow(which_sepSets)>0){
+  if (nrow(which_sepSets) > 0) {
     add_back_list = c()
-    for(sepSet_index in 1:nrow(which_sepSets)){
-
-        #if(as(skel@graph, 'matrix')[x,y]) stop("Edge exists with sepset")
-        sepSet = which_sepSets[sepSet_index,]
-        x = sepSet[1]
-        y = sepSet[2]
-        z = sepSets[[x]][[y]]
-        # Checks if Z is consistent for X,Y pair, adds back X-Y edge if not
-        if(!graphObject$is_consistent(x,y,z)){
-            add_back_list = c(add_back_list, sepSet_index) # List of inconsistent pairs with respect to current graph
-            #print(paste(x,y,paste(z,collapse=',')))
-        }
+    for (sepSet_index in 1:nrow(which_sepSets)) {
+      sepSet = which_sepSets[sepSet_index,]
+      x = sepSet[1]
+      y = sepSet[2]
+      z = sepSets[[x]][[y]]
+      # Checks if Z is consistent for X,Y pair, adds back X-Y edge if not
+      if (!graphObject$is_consistent(x,y,z)) {
+        add_back_list = c(add_back_list, sepSet_index)
+      }
     }
-
     # Add back inconsistent pairs all at once
-    print(paste("Adding back", length(add_back_list), "edges."))
+    cat("Adding back ", length(add_back_list), " edges.\n")
     for(sepSet_index in 1:length(add_back_list)){
-        sepSet = which_sepSets[add_back_list[sepSet_index],]
-        x = sepSet[1]
-        y = sepSet[2]
-        graphObject$add_non_oriented_edge(x,y)
+      sepSet = which_sepSets[add_back_list[sepSet_index],]
+      x = sepSet[1]
+      y = sepSet[2]
+      graphObject$add_non_oriented_edge(x,y)
     }
   }
-
-
   result = orientation
   result@graph <- as(graphObject$adj_matrix_oriented, "graphNEL")
   result@sepset <- sepSets
-
   result
 } ## {pc}
